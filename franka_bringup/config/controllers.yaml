@@ -75,14 +75,30 @@
       joint_state_broadcaster:
         type: joint_state_broadcaster/JointStateBroadcaster
 
-      joint_velocity_example_controller:
-        type: franka_example_controllers/JointVelocityExampleController
+      forward_velocity_controller:
+        type: velocity_controllers/JointGroupVelocityController
+      
+      forward_effort_controller:
+        type: effort_controllers/JointGroupEffortController
+      
+      # --- Franka demonstration controllers ---
+      joint_position_example_controller:
+        type: franka_example_controllers/JointPositionExampleController
 
       model_example_controller:
         type: franka_example_controllers/ModelExampleController
 
       move_to_start_example_controller:
         type: franka_example_controllers/MoveToStartExampleController
+            
+      # ADDED: cartesian velocity 
+      my_cartesian_velocity_controller:
+        type: my_cartesian_velocity_controller/MyCartesianVelocityController 
+    
+      # ADDED: cartesian impedance
+      my_cartesian_impedance_controller:
+        type: my_cartesian_impedance_controller/MyCartesianImpedanceController
+
 
 /**:
   cartesian_elbow_example_controller:
@@ -224,3 +240,21 @@
         - 10.0
         - 10.0
         - 5.0
+/**:        
+  my_cartesian_velocity_controller:
+    ros__parameters:
+      arm_id: "fr3"
+/**:  
+  my_cartesian_impedance_controller:
+    ros__parameters:
+      arm_id: "fr3"
+      trans_stiffness: 500.0
+      rot_stiffness: 50.0
+      nullspace_stiffness: 0.0
+      alpha: 0.15
+      safety_cycles: 3000
+      startup_increment: 0.0005
+      delta_tau_max: 1.0
+      max_force: 50.0
+      max_torque: 15.0
+      # tau_limits: [87.0, 87.0, 87.0, 87.0, 12.0, 12.0, 12.0]

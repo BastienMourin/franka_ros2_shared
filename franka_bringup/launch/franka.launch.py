@@ -100,6 +100,7 @@ def generate_robot_nodes(context):
             'hand': load_gripper_launch_configuration,
             'use_fake_hardware': LaunchConfiguration('use_fake_hardware').perform(context),
             'fake_sensor_commands': LaunchConfiguration('fake_sensor_commands').perform(context),
+            'connected_to': LaunchConfiguration('connected_to').perform(context),
         }
     ).toprettyxml(indent='  ')
 
@@ -213,6 +214,9 @@ def generate_launch_description():
                                     "controllers.yaml"
                                 ]),
                               description='Override the default controllers.yaml file.'),
+        DeclareLaunchArgument('connected_to',
+                              default_value='base',
+                              description='Frame name the robot should be connected to (parent link of link0).'),
     ]
 
     return LaunchDescription(launch_args + [OpaqueFunction(function=generate_robot_nodes)])
