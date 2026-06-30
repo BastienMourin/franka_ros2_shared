@@ -92,9 +92,9 @@ def generate_nodes(context):
     # -- Robot B (NS2): offset transform base → NS2_base ---------------------
     # NS2 is placed 1.6 m along X and rotated 180° around Z so both robots
     # face each other.  'connected_to' in the YAML should be set to 'NS2_base'.
-    tx = 1.26
-    ty = 0.0
-    tz = 0.01
+    tx = 0.89
+    ty = 0.01
+    tz = 0.0
     yaw = math.pi  # 180° — robots face each other along the X axis
 
     qx = 0.0
