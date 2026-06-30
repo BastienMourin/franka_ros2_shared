@@ -64,13 +64,21 @@ CallbackReturn MyCartesianVelocityController::on_init()
         node->declare_parameter<std::string>("arm_id", arm_id_);
     if (!node->has_parameter("arm_prefix"))
         node->declare_parameter<std::string>("arm_prefix", arm_prefix_);
+    if (!node->has_parameter("alpha"))
+        node->declare_parameter<double>("alpha", alpha_);
+    if (!node->has_parameter("rot_scale"))
+        node->declare_parameter<double>("rot_scale", rot_scale_);
 
     node->get_parameter("arm_id",     arm_id_);
     node->get_parameter("arm_prefix", arm_prefix_);
+    node->get_parameter("alpha",      alpha_);
+    node->get_parameter("rot_scale",  rot_scale_);
+    alpha_     = std::max(1e-4, std::min(alpha_, 1.0));
+    rot_scale_ = std::max(0.0, std::min(rot_scale_, 1.0));
 
     RCLCPP_INFO(node->get_logger(),
-                "on_init: arm_id='%s'  arm_prefix='%s'  joint_prefix='%s'",
-                arm_id_.c_str(), arm_prefix_.c_str(), buildJointPrefix().c_str());
+                "on_init: arm_id='%s'  arm_prefix='%s'  joint_prefix='%s'  alpha=%.4f  rot_scale=%.2f",
+                arm_id_.c_str(), arm_prefix_.c_str(), buildJointPrefix().c_str(), alpha_, rot_scale_);
 
     return CallbackReturn::SUCCESS;
 }
@@ -142,8 +150,8 @@ CallbackReturn MyCartesianVelocityController::on_activate(
     }
 
     q_init_          = q_;
-    startup_weight_  = 0.0;
     is_first_update_ = true;
+    q_dot_prev_      = Eigen::VectorXd::Zero(num_joints_);
 
     RCLCPP_INFO(get_node()->get_logger(),
                 "Controller activated (joint prefix: '%s'). Initial position captured.",
@@ -167,7 +175,10 @@ controller_interface::return_type MyCartesianVelocityController::update(
     const rclcpp::Time& /*time*/, const rclcpp::Duration& /*period*/)
 {
     // ----------------------------------------------------------------
-    // STEP 1: Safety Counter (3 s wait at startup)
+    // STEP 1: Startup hold (3 s zero-velocity)
+    // Gives the hardware interface time to fully stabilize after activation
+    // before any motion command is sent. q_dot_prev_ is zero at this point
+    // (reset in on_activate), so the EMA starts from a clean state.
     // ----------------------------------------------------------------
     static int safety_counter = 0;
     if (is_first_update_) {
@@ -182,15 +193,28 @@ controller_interface::return_type MyCartesianVelocityController::update(
     }
 
     // ----------------------------------------------------------------
-    // STEP 2: Pinocchio Computation
+    // STEP 2: Cartesian → joint velocity via damped Jacobian pseudoinverse
+    // Read current joint positions, build the 6×7 end-effector Jacobian
+    // with Pinocchio, then solve:
+    //   q_dot = J^T (J J^T + λ²I)^-1 · v_des
+    // The damping term λ² prevents velocity blowup near singularities
+    // where J J^T would otherwise be ill-conditioned.
+    // Tune damping_param_pinv (= λ²): larger → safer near singularities
+    // but reduced tracking accuracy; smaller → better tracking but riskier.
     // ----------------------------------------------------------------
     for (int i = 0; i < num_joints_; ++i)
         q_[i] = state_interfaces_[i].get_value();
 
     auto current_cmd = input_cmd_.readFromRT();
     if (current_cmd && *current_cmd) {
-        v_des_ << (*current_cmd)->linear.x,  (*current_cmd)->linear.y,  (*current_cmd)->linear.z,
-                  (*current_cmd)->angular.x, (*current_cmd)->angular.y, (*current_cmd)->angular.z;
+        // rot_scale_ scales the angular command at input level so rotation can be
+        // attenuated independently of translation (e.g. to stay within reflex limits).
+        v_des_ << (*current_cmd)->linear.x,
+                  (*current_cmd)->linear.y,
+                  (*current_cmd)->linear.z,
+                  rot_scale_ * (*current_cmd)->angular.x,
+                  rot_scale_ * (*current_cmd)->angular.y,
+                  rot_scale_ * (*current_cmd)->angular.z;
     } else {
         v_des_.setZero();
     }
@@ -199,32 +223,49 @@ controller_interface::return_type MyCartesianVelocityController::update(
     pinocchio::getJointJacobian(model_, data_, 8, pinocchio::LOCAL_WORLD_ALIGNED, J_);
     Eigen::MatrixXd J_arm = J_.block(0, 0, 6, 7);
 
-    double lambda = 0.1;
+    double damping_param_pinv = 0.01;  // = λ² directly (not λ). Increase toward 0.25 if cartesian_reflex near singularities.
     Eigen::MatrixXd J_pinv = J_arm.transpose() *
-        (J_arm * J_arm.transpose() + lambda * lambda * Eigen::MatrixXd::Identity(6, 6)).inverse();
+        (J_arm * J_arm.transpose() + damping_param_pinv * Eigen::MatrixXd::Identity(6, 6)).inverse();
 
     Eigen::VectorXd q_dot_target = J_pinv * v_des_;
 
     // ----------------------------------------------------------------
-    // STEP 3: Slew Rate Limiter
+    // STEP 3: EMA smoothing + per-joint acceleration and velocity hard caps
+    //
+    // EMA low-pass filter prevents step changes in the command from reaching
+    // the robot instantly. Time constant: tau ≈ -0.001 / ln(1 - alpha)
+    //   alpha=0.005 → tau ≈ 200 ms   (default, conservative)
+    //   alpha=0.01  → tau ≈ 100 ms
+    //   alpha=0.1   → tau ≈  10 ms   (nearly instant)
+    //
+    // Hard acceleration cap on top of EMA: EMA alone is not enough because
+    // a worst-case ±v_max step at alpha=0.005 still produces up to 26 rad/s²
+    // on joint 1, exceeding joint 2's datasheet limit of 7.5 rad/s².
+    // The cap clamps the per-step velocity change to accel_limit × dt.
+    //
+    // FR3 datasheet hard limits applied here (joints 1–7):
+    //   vel   [rad/s]:  2.62  2.62  2.62  2.62  5.26  4.18  5.26
+    //   accel [rad/s²]: 15.0   7.5  10.0  12.5  15.0  20.0  20.0
     // ----------------------------------------------------------------
-    static Eigen::VectorXd q_dot_prev = Eigen::VectorXd::Zero(num_joints_);
-    double max_change = 0.0001;
+    static constexpr double kVelLim[7]   = {2.62, 2.62, 2.62, 2.62, 5.26, 4.18, 5.26};
+    static constexpr double kAccelLim[7] = {15.0, 7.5, 10.0, 12.5, 15.0, 20.0, 20.0};
+    constexpr double dt = 0.001;  // 1 kHz control loop
 
-    Eigen::VectorXd q_dot_safe = q_dot_target;
+    Eigen::VectorXd q_dot_safe(num_joints_);
     for (int i = 0; i < num_joints_; ++i) {
-        double diff = q_dot_target[i] - q_dot_prev[i];
-        diff = std::max(std::min(diff, max_change), -max_change);
-        q_dot_safe[i] = q_dot_prev[i] + diff;
-        q_dot_prev[i] = q_dot_safe[i];
+        double ema    = alpha_ * q_dot_target[i] + (1.0 - alpha_) * q_dot_prev_[i];
+        double delta  = ema - q_dot_prev_[i];
+        double max_d  = kAccelLim[i] * dt;
+        delta         = std::max(std::min(delta, max_d), -max_d);
+        q_dot_safe[i] = q_dot_prev_[i] + delta;
+        q_dot_safe[i] = std::max(std::min(q_dot_safe[i], kVelLim[i]), -kVelLim[i]);
+        q_dot_prev_[i] = q_dot_safe[i];
     }
 
     // ----------------------------------------------------------------
-    // STEP 4: Send commands
+    // STEP 4: Write commands to the hardware interface
     // ----------------------------------------------------------------
-    double v_max_abs = 0.5;
     for (int i = 0; i < num_joints_; ++i) {
-        q_dot_safe[i] = std::max(std::min(q_dot_safe[i], v_max_abs), -v_max_abs);
         command_interfaces_[i].set_value(q_dot_safe[i]);
     }
 
