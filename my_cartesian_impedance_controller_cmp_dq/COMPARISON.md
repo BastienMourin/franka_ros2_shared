@@ -29,16 +29,29 @@ This is the reason the variant exists. It lets you command a contact force
 independently of the pose error, instead of getting force only as a by-product
 of deliberately commanding a target the robot cannot reach.
 
-**Why this may matter for the sole-detachment problem.** Raising
-`trans_stiffness` to generate detachment force means the controller is storing
-that force as elastic energy in a pose error. When the sole releases, the error
-collapses and the stored energy goes into motion — the "elastic overload"
-behaviour, and it gets worse the stiffer you go, which is exactly the wrong
-direction. With a feedforward wrench you can run a *low* stiffness and push with
-`F_ff`: the stored energy stays small, so release is far less violent, and the
-watchdogs have less to catch. Same argument applies to the second robot holding
-the shoe — it can push back with a commanded force rather than being levered
-into a pose error.
+**Why this may matter for the sole-detachment problem.** With stiffness alone,
+force and stored energy come together: the only way to get more force is a
+larger pose error, and that error is a loaded spring. When the sole releases,
+that energy goes into moving the arm, and stiffening further to get more force
+makes the release more violent rather than less.
+
+A feedforward wrench separates the two. You can hold a low stiffness, keep the
+commanded pose close to where the arm actually is, and carry the contact force
+on `F_ff` instead. The same applies to a second robot holding the shoe: it can
+push back with a commanded force rather than being levered into a pose error,
+which is what makes two stiff arms fight each other.
+
+Two caveats worth being clear about:
+
+- **This only helps while the commanded pose stays near the arm.** If you drive
+  a target that the arm cannot follow, the pose error grows again and so does
+  the stored energy, feedforward or not. The benefit comes from keeping the
+  error small, not from the feedforward term by itself.
+- **The feedforward does not stop on its own.** When the sole releases, `F_ff`
+  keeps pushing until you stop commanding it, so a release strategy is still
+  needed — ramp it down, or cut it on a velocity threshold. That is an easier
+  failure to handle than a spring release, because you are acting on something
+  you command rather than on energy already stored.
 
 This also makes a lateral or pendulum-like peeling motion straightforward: you
 drive the pose along the peel path at low stiffness and let `F_ff` carry the
@@ -139,17 +152,21 @@ Eigen::Quaterniond q_target_raw(M_des_raw_.rotation());
 M_des_.rotation() = q_current_des.slerp(alpha_, q_target_raw).toRotationMatrix();
 ```
 
-Every cycle round-trips matrix → quaternion → slerp → matrix. Eigen's `slerp`
-does not renormalise its result, and `toRotationMatrix()` of a quaternion with
-norm `1+eps` yields a matrix scaled by `(1+eps)²`, so the norm error **squares
-every cycle**. It sits at machine epsilon for a long time and then diverges
-abruptly. On our hardware `|q_des| - 1` went from `1e-15` to `3e-3` in 30 ms,
-the desired orientation angle collapsed, and the resulting bogus orientation
-error commanded a very large wrench.
+Every cycle round-trips matrix → quaternion → slerp → matrix, and nothing in
+that loop renormalises: Eigen's `slerp` does not, and the filter state is read
+back out of a rotation matrix each time rather than kept as a quaternion. So a
+small norm error is never corrected, and it is fed back in on the next cycle.
 
-The trigger is a *stationary* target: when the commanded orientation stops
-changing, `slerp`'s `sin(theta)` denominator amplifies relative error as
-`theta → 0`. A controller holding a pose is exactly that case, so a long hold is
+The amplifier is a *stationary* target. As the commanded orientation stops
+changing, the rotation between the two quaternions goes to zero, and `slerp`
+divides by the sine of that angle. The closer the target is to standing still,
+the more the existing error is magnified. The error therefore grows
+geometrically: it sits at round-off level for a long time, then rises very
+quickly over a handful of milliseconds, the filtered orientation stops being a
+valid rotation, and the resulting bogus orientation error commands a large
+wrench.
+
+A controller holding a pose is exactly the stationary case, so a long hold is
 the risky situation, not a fast trajectory.
 
 The fix is to keep the filter state as a quaternion and renormalise it, never
