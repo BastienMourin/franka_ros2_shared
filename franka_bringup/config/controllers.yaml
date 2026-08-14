@@ -75,14 +75,26 @@
       joint_state_broadcaster:
         type: joint_state_broadcaster/JointStateBroadcaster
 
-      joint_velocity_example_controller:
-        type: franka_example_controllers/JointVelocityExampleController
+      forward_velocity_controller:
+        type: velocity_controllers/JointGroupVelocityController
+      
+      forward_effort_controller:
+        type: effort_controllers/JointGroupEffortController
+      
+      # --- Franka demonstration controllers ---
+      joint_position_example_controller:
+        type: franka_example_controllers/JointPositionExampleController
 
       model_example_controller:
         type: franka_example_controllers/ModelExampleController
 
       move_to_start_example_controller:
         type: franka_example_controllers/MoveToStartExampleController
+            
+      # ADDED: cartesian impedance with dual-quaternion screw error
+      my_cartesian_impedance_controller_cmp_dq:
+        type: my_cartesian_impedance_controller_cmp_dq/MyCartesianImpedanceControllerCmpDQ
+
 
 /**:
   cartesian_elbow_example_controller:
@@ -224,3 +236,54 @@
         - 10.0
         - 10.0
         - 5.0
+/**:
+  my_cartesian_impedance_controller_cmp_dq:
+    ros__parameters:
+      arm_id: "fr3"
+      arm_prefix: ""
+
+      # --- Impedance gains -------------------------------------------------
+      # One scalar stiffness restores all six screw-error components. Damping
+      # follows it automatically:
+      #     D_trans = 2*sqrt(screw_stiffness)                   = 31.62 at K=250
+      #     D_rot   = rot_damping_ratio * D_trans               =  6.32 at 0.2
+      # so the damping ratio stays constant when you retune the stiffness.
+      # This is the main knob: raise it for stiffer tracking, lower it for
+      # compliance. Around 400 works well while measuring forces, 50 when
+      # replaying with a feedforward wrench.
+      screw_stiffness: 250.0
+
+      # Rotational damping as a fraction of translational. Rotation is the axis
+      # that destabilises first (apparent inertia there is ~300x smaller), so it
+      # gets its own knob. The controller warns above 0.5; values near 1.0
+      # over-damp the wrist and can trip a Cartesian reflex.
+      rot_damping_ratio: 0.2
+
+      # Pulls the arm toward its activation posture without disturbing the
+      # Cartesian task. 0.0 disables it.
+      nullspace_stiffness: 0.0
+
+      # --- Filtering and rate limits ---------------------------------------
+      # Per-cycle low-pass on the desired pose, the stiffness and the damping.
+      # Smaller is smoother but lags more; raise it if tracking feels sluggish.
+      alpha: 0.005
+
+      # Torque slew limit [Nm per 1 ms cycle]. Keep below the robot's hard
+      # torque-rate limit (1000 Nm/s on an FR3).
+      delta_tau_max: 1.0
+
+      # --- Safety ----------------------------------------------------------
+      # Cartesian wrench clamp. Keeps a transient at high stiffness from
+      # exceeding the robot's collision thresholds and aborting the motion.
+      #
+      # Set false when the feedforward wrench is itself close to max_torque:
+      # the clamp scales the whole block, so it would drag the restoring moment
+      # down with it and distort the commanded direction. tau_limits below
+      # stays active either way.
+      wrench_saturation: false
+      max_force: 25.0    # [N]
+      max_torque: 25.0   # [Nm]
+
+      # Per-joint torque clamp, always applied. These are the FR3's hardware
+      # limits; change them for another arm.
+      tau_limits: [87.0, 87.0, 87.0, 87.0, 12.0, 12.0, 12.0]
