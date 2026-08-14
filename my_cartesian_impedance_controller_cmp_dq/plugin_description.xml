@@ -1,0 +1,10 @@
+<library path="my_cartesian_impedance_controller_cmp_dq">
+  <class name="my_cartesian_impedance_controller_cmp_dq/MyCartesianImpedanceControllerCmpDQ"
+         type="my_cartesian_impedance_controller_cmp_dq::MyCartesianImpedanceControllerCmpDQ"
+         base_class_type="controller_interface::ControllerInterface">
+    <description>
+      Cartesian impedance controller using a dual-quaternion screw displacement
+      error, with a feedforward wrench input summed into the control law.
+    </description>
+  </class>
+</library>
